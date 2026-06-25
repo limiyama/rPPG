@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Teste rPPG</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #222; color: #fff; }
+        #video-container { position: relative; width: 640px; height: 480px; margin: 20px auto; }
+        video, canvas { position: absolute; top: 0; left: 0; width: 640px; height: 480px; border-radius: 8px; }
+        canvas { z-index: 10; pointer-events: none; } /* Fica por cima do vídeo */
+        #results { font-size: 1.2rem; margin-top: 20px; }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <h1>Monitor Cardíaco rPPG (Webcam)</h1>
+    
+    <div id="video-container">
+        <video id="webcam" autoplay playsinline muted></video>
+        <canvas id="output_canvas" width="640" height="480"></canvas>
+    </div>
+
+    <div id="results">
+        <p id="status">Aguardando inicialização...</p>
+        <h2 id="bpm">BPM: --</h2>
+        <p id="spo2">SpO₂: --</p>
+        <p id="wellness">Score de Bem-estar: --</p>
+    </div>
+
+    <script src="rppg-core.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
