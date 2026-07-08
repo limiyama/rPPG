@@ -6,10 +6,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const spo2El = document.getElementById('spo2');
     const wellnessEl = document.getElementById('wellness');
 
-    // 1. Instancia o analisador do rppg-core.js
     const analyzer = new RppgAnalyzer();
 
-    // 2. Configura os Callbacks de atualização da UI
     analyzer.onProgress = (percent, partialMetrics) => {
         statusEl.innerText = `Análise em andamento: ${percent}%`;
         if (partialMetrics) {
@@ -39,13 +37,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         statusEl.style.color = "red";
     };
 
-    // 3. Inicializa a câmera e o MediaPipe
     statusEl.innerText = "Carregando câmera e inteligência artificial...";
     const initSuccess = await analyzer.init(videoEl, canvasEl);
 
     if (initSuccess) {
         statusEl.innerText = "Pronto! Iniciando contagem de 30 segundos...";
-        // Começa a gravar os frames
         analyzer.start();
     }
 });

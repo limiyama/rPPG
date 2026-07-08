@@ -73,18 +73,12 @@ def point_in_polygon(x, y, polygon):
     return inside
 
 def extract_roi_mean(image_data, landmarks):
-    """
-    image_data: matriz numpy da imagem (H, W, C) em formato RGB ou BGR.
-    landmarks: lista ou dicionário contendo objetos/dicionários com atribudos x e y (0.0 a 1.0)
-    """
     height, width, _ = image_data.shape
     total_r, total_g, total_b, total_count = 0.0, 0.0, 0.0, 0
 
     for roi_name, indices in ROI_LANDMARKS.items():
         points = []
         for idx in indices:
-            # Em Python/MediaPipe as landmarks costumam ter atributos .x e .y
-            # Se for um dict, mude para landmarks[idx]['x']
             lm = landmarks[idx]
             px = int(round(getattr(lm, 'x', lm.get('x', 0)) * width))
             py = int(round(getattr(lm, 'y', lm.get('y', 0)) * height))
@@ -148,10 +142,6 @@ def apply_pos(r, g, b):
     h = s1 + alpha * s2
     return detrend(h)
 
-
-# ---------------------------------------------------------------------------
-# FILTRO PASSA-BANDA (Butterworth Ordem 2 via Biquad IIR)
-# ---------------------------------------------------------------------------
 def bandpass_filter(signal, fs, freq_min=CONFIG["FREQ_MIN"], freq_max=CONFIG["FREQ_MAX"]):
     nyq = fs / 2.0
     low = freq_min / nyq
@@ -180,10 +170,6 @@ def bandpass_filter(signal, fs, freq_min=CONFIG["FREQ_MIN"], freq_max=CONFIG["FR
 
     return out
 
-
-# ---------------------------------------------------------------------------
-# FFT E EXTRAÇÃO DE BPM
-# ---------------------------------------------------------------------------
 def next_pow2(n):
     p = 1
     while p < n:
@@ -195,7 +181,7 @@ def fft_analysis(signal):
     padded = np.zeros(n)
     padded[:len(signal)] = signal
 
-    # Utilizando o FFT nativo do NumPy que substitui com extrema eficiência o Cooley-Tukey manual
+    # FFT nativo do NumPy
     fft_res = np.fft.fft(padded)
     half = n // 2
     magnitude = np.abs(fft_res[:half])
@@ -236,9 +222,7 @@ def extract_bpm(signal, fs):
     }
 
 
-# ---------------------------------------------------------------------------
-# SINAIS R-R E VARIABILIDADE CARDÍACA (HRV)
-# ---------------------------------------------------------------------------
+# HRV
 def detect_peaks(signal, fs, bpm):
     if bpm <= 0:
         bpm = 70
@@ -282,10 +266,7 @@ def calculate_hrv(peak_indices, fs):
         "rrIntervals": rr_intervals,
     }
 
-
-# ---------------------------------------------------------------------------
-# OXIMETRIA (SpO2) E SCORE DE BEM-ESTAR
-# ---------------------------------------------------------------------------
+# OXIMETRIA (SpO2)
 def estimate_spo2(r, g):
     r_detrend = detrend(r)
     g_detrend = detrend(g)
@@ -343,15 +324,7 @@ def calculate_wellness_score(metrics):
     }
 
 
-# ---------------------------------------------------------------------------
-# ORQUESTRADOR PRINCIPAL
-# ---------------------------------------------------------------------------
 class RppgAnalyzer:
-    """
-    Orquestrador simplificado para Python.
-    Nota: Gerenciamento de Câmera/Webcam e loops assíncronos (como UI) devem ser tratados 
-    externamente (ex: usando OpenCV para capturar os frames e MediaPipe Python).
-    """
     def __init__(self, config=None):
         if config is None:
             config = {}
@@ -360,7 +333,6 @@ class RppgAnalyzer:
         self.is_running = False
         self.start_time = None
 
-        # Callbacks imitados do JS
         self.on_progress = None   # lambda pct, partial_metrics: ...
         self.on_result = None     # lambda result: ...
         self.on_error = None      # lambda err_msg: ...

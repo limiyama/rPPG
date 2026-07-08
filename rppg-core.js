@@ -1,12 +1,12 @@
 /*
- *   1. Captura frames da webcam via MediaPipe Face Mesh
- *   2. Extrai ROI (testa + bochechas)
- *   3. Calcula médias RGB de cada ROI por frame
- *   4. Aplica algoritmo POS para separar sinal de pulso do ruído de movimento
- *   5. Aplica filtro passa-banda (0.7–3.5 Hz = 42–210 BPM)
+ *   1. frames da webcam via MediaPipe Face Mesh
+ *   2. extração ROI (testa + bochechas)
+ *   3. cálculo médias RGB de cada ROI por frame
+ *   4. aplica algoritmo POS para separar sinal de pulso de ruído
+ *   5. aplica filtro passa-banda (0.7–3.5 Hz = 42–210 BPM)
  *   6. FFT → pico dominante = BPM
- *   7. Derivação de HRV (RMSSD) a partir dos intervalos R-R
- *   8. Estimativa de SpO₂ via razão R/IR simulada com canais R e G
+ *   7. derivação de HRV (RMSSD) a partir dos intervalos R-R
+ *   8. estimativa de SpO₂ via razão R/IR simulada com canais R e G
  */
 
 const CONFIG = {
@@ -100,9 +100,7 @@ function extractROIMean(imageData, landmarks) { // imageData - pixels brutos
   };
 }
 
-/**
- * Ray casting algorithm — verifica se ponto está dentro do polígono da ROI
- */
+//Ray casting algorithm — verifica se ponto está dentro do polígono da ROI
 function pointInPolygon(point, polygon) {
   let inside = false;
   const n = polygon.length;
@@ -121,52 +119,37 @@ function pointInPolygon(point, polygon) {
 function applyPOS(r, g, b) {
   const n = r.length;
 
-  // Normaliza cada canal pela sua média temporal (C_n = C / mean(C))
+  // normaliza cada canal pela sua média temporal (C_n = C / mean(C))
   const meanR = mean(r), meanG = mean(g), meanB = mean(b);
   const rn = r.map(v => v / (meanR || 1));
   const gn = g.map(v => v / (meanG || 1));
   const bn = b.map(v => v / (meanB || 1));
 
-  // Projeção POS: S1 = Gn - Bn ; S2 = Gn + Bn - 2*Rn
+  // projeção POS: S1 = Gn - Bn ; S2 = Gn + Bn - 2*Rn
   const s1 = gn.map((g, i) => g - bn[i]);
   const s2 = gn.map((g, i) => g + bn[i] - 2 * rn[i]);
 
-  // Componente final H = S1 + (std(S1)/std(S2)) * S2
+  // componente final H = S1 + (std(S1)/std(S2)) * S2
   const alpha = stdDev(s1) / (stdDev(s2) || 1e-10);
   const h = s1.map((v, i) => v + alpha * s2[i]);
 
-  // Remove tendência linear (detrend)
+  // remove tendência linear (detrend)
   return detrend(h);
 }
 
 
-// ---------------------------------------------------------------------------
-// 5. FILTRO PASSA-BANDA — Butterworth de ordem 2 (implementação biquad)
-// ---------------------------------------------------------------------------
-
-/**
- * Filtro Butterworth passa-banda digital (ordem 2, implementação biquad IIR).
- * Mantém apenas frequências entre freqMin e freqMax Hz.
- *
- * @param {number[]} signal
- * @param {number} fs - taxa de amostragem (FPS)
- * @param {number} freqMin
- * @param {number} freqMax
- * @returns {number[]}
- */
+// filtro passa-banda - butterworth para filtrar apenas a frequência do rPPG
 function bandpassFilter(signal, fs, freqMin = CONFIG.FREQ_MIN, freqMax = CONFIG.FREQ_MAX) {
-  // Coeficientes biquad para passa-banda — calculados via transformação bilinear
+  // coeficientes biquad para passa-banda — calculados via transformação bilinear
   const nyq = fs / 2;
   const low = freqMin / nyq;
   const high = freqMax / nyq;
 
-  // Pré-warp das frequências
   const w1 = Math.tan(Math.PI * low);
   const w2 = Math.tan(Math.PI * high);
   const bw = w2 - w1;
   const wc2 = w1 * w2;
 
-  // Coeficientes do filtro passa-banda biquad
   const b0 = bw;
   const b1 = 0;
   const b2 = -bw;
@@ -174,11 +157,9 @@ function bandpassFilter(signal, fs, freqMin = CONFIG.FREQ_MIN, freqMax = CONFIG.
   const a1 = 2 * (wc2 - 1);
   const a2 = 1 - bw + wc2;
 
-  // Normaliza
   const B = [b0 / a0, b1 / a0, b2 / a0];
   const A = [1, a1 / a0, a2 / a0];
 
-  // Aplica filtro IIR (forward pass)
   const out = new Array(signal.length).fill(0);
   for (let i = 0; i < signal.length; i++) {
     out[i] = B[0] * signal[i]
@@ -190,26 +171,17 @@ function bandpassFilter(signal, fs, freqMin = CONFIG.FREQ_MIN, freqMax = CONFIG.
 }
 
 
-// ---------------------------------------------------------------------------
-// 6. FFT — Fast Fourier Transform (Cooley-Tukey radix-2)
-// ---------------------------------------------------------------------------
-
-/**
- * FFT recursiva in-place sobre array de tamanho potência de 2.
- * Retorna {magnitude, freqs} para análise espectral.
- */
+// fast fourier transform para obter bpm
 function fft(signal) {
-  // Pad para próxima potência de 2
   const n = nextPow2(signal.length);
   const padded = [...signal, ...new Array(n - signal.length).fill(0)];
 
-  // Parte real e imaginária
   const re = [...padded];
   const im = new Array(n).fill(0);
 
   fftInPlace(re, im, n);
 
-  // Magnitude (apenas metade positiva do espectro)
+  // magnitude (apenas metade positiva do espectro)
   const half = Math.floor(n / 2);
   const magnitude = re.slice(0, half).map((r, i) => Math.sqrt(r * r + im[i] * im[i]));
 
@@ -217,7 +189,6 @@ function fft(signal) {
 }
 
 function fftInPlace(re, im, n) {
-  // Bit-reversal permutation
   let j = 0;
   for (let i = 1; i < n; i++) {
     let bit = n >> 1;
@@ -228,7 +199,7 @@ function fftInPlace(re, im, n) {
       [im[i], im[j]] = [im[j], im[i]];
     }
   }
-  // Cooley-Tukey butterfly
+  // Cooley-Tukey butterfly (algoritmo FFT)
   for (let len = 2; len <= n; len <<= 1) {
     const ang = -2 * Math.PI / len;
     const wRe = Math.cos(ang), wIm = Math.sin(ang);
@@ -315,11 +286,11 @@ function calculateHRV(peakIndices, fs) {
     return { rmssd: 0, sdnn: 0, meanRR: 0, rrIntervals: [] };
   }
 
-  // Intervalos R-R em milissegundos
+  // intervalos R-R em milissegundos
   const rrIntervals = [];
   for (let i = 1; i < peakIndices.length; i++) {
     const rr = ((peakIndices[i] - peakIndices[i - 1]) / fs) * 1000;
-    // Filtra intervalos fisiologicamente impossíveis (< 300ms ou > 2000ms)
+    // filtra intervalos fisiologicamente impossíveis (< 300ms ou > 2000ms)
     if (rr >= 300 && rr <= 2000) rrIntervals.push(rr);
   }
 
