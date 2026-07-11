@@ -1,6 +1,7 @@
 import time
 from datetime import datetime
 import numpy as np
+import cv2
 
 CONFIG = {
     "FPS": 30,                  # frames por segundo da câmera
@@ -55,56 +56,37 @@ class FrameBuffer:
 
 
 # extração de ROIs
-def point_in_polygon(x, y, polygon):
-    ## algoritmo ray casting
-    inside = False
-    n = len(polygon)
-    p1x, p1y = polygon[0]
-    for i in range(n + 1):
-        p2x, p2y = polygon[i % n]
-        if y > min(p1y, p2y):
-            if y <= max(p1y, p2y):
-                if x <= max(p1x, p2x):
-                    if p1y != p2y:
-                        xints = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-                    if p1x == p2x or x <= xints:
-                        inside = not inside
-        p1x, p1y = p2x, p2y
-    return inside
-
 def extract_roi_mean(image_data, landmarks):
     height, width, _ = image_data.shape
-    total_r, total_g, total_b, total_count = 0.0, 0.0, 0.0, 0
+    mask = np.zeros((height, width), dtype=np.uint8)
 
-    for roi_name, indices in ROI_LANDMARKS.items():
+    for indices in ROI_LANDMARKS.values():
         points = []
         for idx in indices:
             lm = landmarks[idx]
-            px = int(round(getattr(lm, 'x', lm.get('x', 0)) * width))
-            py = int(round(getattr(lm, 'y', lm.get('y', 0)) * height))
-            points.append((px, py))
+            px = getattr(lm, 'x', None)
+            py = getattr(lm, 'y', None)
+            if px is None:
+                px = lm.get('x', 0)
+                py = lm.get('y', 0)
+            points.append((
+                int(round(px * width)),
+                int(round(py * height)),
+            ))
 
-        if not points:
+        if len(points) < 3:
             continue
 
-        x_coords = [p[0] for p in points]
-        y_coords = [p[1] for p in points]
-        
-        x_min = max(0, min(x_coords))
-        x_max = min(width - 1, max(x_coords))
-        y_min = max(0, min(y_coords))
-        y_max = min(height - 1, max(y_coords))
+        poly = np.array([points], dtype=np.int32)
+        cv2.fillPoly(mask, poly, 1)
 
-        for y in range(y_min, y_max + 1):
-            for x in range(x_min, x_max + 1):
-                if point_in_polygon(x, y, points):
-                    total_r += image_data[y, x, 0]
-                    total_g += image_data[y, x, 1]
-                    total_b += image_data[y, x, 2]
-                    total_count += 1
-
+    total_count = int(np.count_nonzero(mask))
     if total_count == 0:
         return {"r": 0.0, "g": 0.0, "b": 0.0}
+
+    total_r = float(np.sum(image_data[:, :, 0][mask == 1]))
+    total_g = float(np.sum(image_data[:, :, 1][mask == 1]))
+    total_b = float(np.sum(image_data[:, :, 2][mask == 1]))
 
     return {
         "r": total_r / total_count,
@@ -196,7 +178,7 @@ def extract_bpm(signal, fs):
     valid_indices = [i for i, f in enumerate(freqs) if CONFIG["FREQ_MIN"] <= f <= CONFIG["FREQ_MAX"]]
 
     if not valid_indices:
-        return {"bpm": 0, "confidence": 0}
+        return {"bpm": 0, "confidence": 0, "spectrum": {"freqs": freqs.tolist(), "magnitude": magnitude.tolist()}}
 
     peak_idx = valid_indices[0]
     peak_mag = 0.0
