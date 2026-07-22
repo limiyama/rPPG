@@ -1,4 +1,3 @@
-import argparse
 import time
 import sys
 
@@ -6,10 +5,11 @@ import cv2
 import numpy as np
 from scipy import signal as sig
 from scipy.fft import rfft, rfftfreq
+from scipy.interpolate import interp1d
 
 try:
     import mediapipe as mp
-    from mediapipe.tasks.python import BaseOptions 
+    from mediapipe.tasks.python import BaseOptions
     from mediapipe.tasks.python.vision import (
         FaceLandmarker,
         FaceLandmarkerOptions,
@@ -62,11 +62,12 @@ class RPPGCapture:
             min_tracking_confidence=0.6,
         )
         self.face_landmarker = FaceLandmarker.create_from_options(options)
-        self._last_timestamp_ms = -1 
+        self._last_timestamp_ms = -1
 
         # buffers de sinal RGB por frame, por ROI (média)
         self.roi_signals = {roi: [] for roi in ROI_POINTS}
         self.timestamps = []
+        self.n_frames_descartados = 0
 
     def run(self):
         cap = cv2.VideoCapture(self.camera_index)
@@ -96,8 +97,9 @@ class RPPGCapture:
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             result = self.face_landmarker.detect_for_video(mp_image, timestamp_ms)
 
+            frame_valid = False
             if result.face_landmarks:
-                face_landmarks = result.face_landmarks[0]  # lista de NormalizedLandmark
+                face_landmarks = result.face_landmarks[0] 
                 h, w = frame.shape[:2]
                 landmarks_px = [(int(lm.x * w), int(lm.y * h))
                                  for lm in face_landmarks]
@@ -109,11 +111,10 @@ class RPPGCapture:
                     if mask is None or cv2.countNonZero(mask) == 0:
                         frame_valid = False
                         break
-                    # média espacial dos canais R, G, B dentro da ROI
-                    mean_rgb = cv2.mean(rgb_frame, mask=mask)[:3]  # (R, G, B)
+                    
+                    mean_rgb = cv2.mean(rgb_frame, mask=mask)[:3] 
                     frame_means[roi_name] = mean_rgb
 
-                    # contorno da ROI
                     contour, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                                     cv2.CHAIN_APPROX_SIMPLE)
                     cv2.drawContours(frame, contour, -1, (0, 255, 0), 1)
@@ -123,7 +124,9 @@ class RPPGCapture:
                         self.roi_signals[roi_name].append(frame_means[roi_name])
                     self.timestamps.append(time.time())
 
-            # feedback visual em tempo real
+            if not frame_valid:
+                self.n_frames_descartados += 1
+
             remaining = max(0, self.duration_s - elapsed)
             cv2.putText(frame, f"Escaneando... {remaining:0.1f}s", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
@@ -140,23 +143,42 @@ class RPPGCapture:
             raise RuntimeError("Poucos frames válidos capturados. "
                                 "Verifique iluminação e posicionamento do rosto.")
 
-        fps_estimado = n_frames / (self.timestamps[-1] - self.timestamps[0])
+        fps_medio = n_frames / (self.timestamps[-1] - self.timestamps[0])
         print(f"Captura concluída: {n_frames} frames válidos, "
-              f"fps efetivo ≈ {fps_estimado:.2f}")
+              f"{self.n_frames_descartados} descartados (rosto/ROI não detectados), "
+              f"fps médio ≈ {fps_medio:.2f}")
 
-        signals = {roi: np.array(vals, dtype=np.float64)  # shape (N, 3) RGB
+        signals = {roi: np.array(vals, dtype=np.float64) 
                    for roi, vals in self.roi_signals.items()}
-        return signals, fps_estimado
+        return signals, np.array(self.timestamps, dtype=np.float64)
+
+
+# reamostragem para grade de tempo uniforme
+def resample_to_uniform_grid(roi_signals, timestamps, fps_target=None):
+    timestamps = np.asarray(timestamps, dtype=np.float64)
+
+    if fps_target is None:
+        dt_mediano = np.median(np.diff(timestamps))
+        fps_target = 1.0 / dt_mediano
+
+    t_uniform = np.arange(timestamps[0], timestamps[-1], 1.0 / fps_target)
+
+    resampled = {}
+    for roi_name, rgb_raw in roi_signals.items():
+        interp = interp1d(timestamps, rgb_raw, axis=0, kind='linear')
+        resampled[roi_name] = interp(t_uniform)
+
+    return resampled, t_uniform, fps_target
 
 
 # pré-processamento
 def preprocess_rgb_signal(rgb_signal):
-    # detrend - remove tendência linear e normaliza cada canal RGB pela sua média
     detrended = sig.detrend(rgb_signal, axis=0, type='linear')
     means = np.mean(rgb_signal, axis=0)
     means[means == 0] = 1e-6
     normalized = detrended / means + 1.0 
     return normalized
+
 
 # suaviza artefatos de movimento da câmera
 def moving_average_smooth(x, window=3):
@@ -181,6 +203,7 @@ def chrom_algorithm(rgb_norm):
     S = X - alpha * Y
     return S
 
+
 # extração do rPPG por POS
 def pos_algorithm(rgb_norm, fps, window_s=1.6):
     n = rgb_norm.shape[0]
@@ -195,20 +218,20 @@ def pos_algorithm(rgb_norm, fps, window_s=1.6):
         mean_seg[mean_seg == 0] = 1e-6
         Cn = segment / mean_seg
 
-        S1 = Cn[:, 1] - Cn[:, 2]              # G - B
-        S2 = Cn[:, 1] + Cn[:, 2] - 2 * Cn[:, 0]  # G + B - 2R
+        S1 = Cn[:, 1] - Cn[:, 2]              
+        S2 = Cn[:, 1] + Cn[:, 2] - 2 * Cn[:, 0]  
 
         std1, std2 = np.std(S1), np.std(S2)
         alpha = std1 / std2 if std2 != 0 else 1.0
         h = S1 + alpha * S2
 
-        # overlap-add com normalização de variância (sobreposição-adição)
         h = (h - np.mean(h)) / (np.std(h) + 1e-8)
         S[start:end] += h
 
     return S
 
-# processa, aplica CHROM e POS separadamente, normaliza os resultados e faz a média entre eles
+
+# processa, aplica CHROM e POS separadamente, normaliza os resultados e faz a média
 def combine_roi_and_methods(roi_signals, fps):
     combined_per_roi = []
 
@@ -219,15 +242,12 @@ def combine_roi_and_methods(roi_signals, fps):
         s_chrom = chrom_algorithm(rgb_norm)
         s_pos = pos_algorithm(rgb_norm, fps)
 
-        # z-score de cada sinal antes de combinar (mesma escala)
         z_chrom = (s_chrom - np.mean(s_chrom)) / (np.std(s_chrom) + 1e-8)
         z_pos = (s_pos - np.mean(s_pos)) / (np.std(s_pos) + 1e-8)
 
-        # média CHROM + POS
         s_final_roi = 0.5 * z_chrom + 0.5 * z_pos
         combined_per_roi.append(s_final_roi)
 
-    # combina as ROIs (média) em um único sinal rPPG final.
     min_len = min(len(s) for s in combined_per_roi)
     combined_per_roi = [s[:min_len] for s in combined_per_roi]
     rppg_signal = np.mean(np.vstack(combined_per_roi), axis=0)
@@ -235,7 +255,7 @@ def combine_roi_and_methods(roi_signals, fps):
     return rppg_signal
 
 
-# fitro butterworth passa-banda entre 0.7 Hz (42 bpm) e 4.0 Hz (240 bpm)
+# filtro butterworth passa-banda entre 0.7 Hz e 4.0 Hz
 def bandpass_filter(x, fps, low_hz=0.7, high_hz=4.0, order=4):
     nyq = 0.5 * fps
     low = low_hz / nyq
@@ -244,10 +264,10 @@ def bandpass_filter(x, fps, low_hz=0.7, high_hz=4.0, order=4):
     y = sig.filtfilt(b, a, x)
     return y
 
+
 # calcula frequência cardíaca (HR) por FFT
 def compute_hr_fft(filtered_signal, fps):
     n = len(filtered_signal)
-    # janela de Hann reduz vazamento espectral (spectral leakage) whatever that meanss
     windowed = filtered_signal * np.hanning(n)
 
     freqs = rfftfreq(n, d=1.0 / fps)
@@ -264,28 +284,26 @@ def compute_hr_fft(filtered_signal, fps):
     peak_freq_hz = freqs_valid[peak_idx]
     hr_bpm = peak_freq_hz * 60.0
 
-    return hr_bpm, freqs_valid, fft_valid
+    return hr_bpm
 
 
-# cálculo HRV (diferença entre intervalos R-R)
-def compute_hrv(filtered_signal, fps):
-    min_distance = int(fps * 60.0 / 240.0)
-    peaks, _ = sig.find_peaks(filtered_signal, distance=min_distance)
+# cálculo HRV
+def compute_hrv(filtered_signal, fps, t_uniform, max_hr_bpm=200.0, min_prominence_std=0.3):
+    min_distance = max(1, int(round(fps * 60.0 / max_hr_bpm)))
+    prominence = min_prominence_std * np.std(filtered_signal)
+
+    peaks, _ = sig.find_peaks(filtered_signal, distance=min_distance, prominence=prominence)
 
     if len(peaks) < 3:
         return {
             "SDNN_ms": None, "RMSSD_ms": None, "pNN50_%": None,
-            # SDNN (Standard Deviation of Normal-to-Normal intervals) = desvio padrão de todos os intervalos entre os batimentos, medido em milissegundos
-            # RMSSD (Root Mean Square of Successive Differences)= diferença sucessiva entre os batimentos - medir a atividade do sistema nervoso parassimpático?
-            # pNN50 = porcentagem de batimentos consecutivos que tiveram uma diferença de tempo maior que 50 milissegundos entre eles
             "n_batimentos_detectados": len(peaks),
             "aviso": "Batimentos insuficientes para HRV confiável."
-        }
+        }, peaks, np.array([])
 
-    peak_times_s = peaks / fps
-    ibi_ms = np.diff(peak_times_s) * 1000.0  # intervalos inter-batimento em ms
+    peak_times_s = t_uniform[peaks]
+    ibi_ms = np.diff(peak_times_s) * 1000.0  
 
-    # remove outliers
     ibi_ms = ibi_ms[(ibi_ms > 250) & (ibi_ms < 1500)]
 
     if len(ibi_ms) < 2:
@@ -293,7 +311,7 @@ def compute_hrv(filtered_signal, fps):
             "SDNN_ms": None, "RMSSD_ms": None, "pNN50_%": None,
             "n_batimentos_detectados": len(peaks),
             "aviso": "IBIs insuficientes após remoção de outliers."
-        }
+        }, peaks, ibi_ms
 
     sdnn = np.std(ibi_ms, ddof=1)
     diffs = np.diff(ibi_ms)
@@ -301,41 +319,55 @@ def compute_hrv(filtered_signal, fps):
     nn50 = np.sum(np.abs(diffs) > 50)
     pnn50 = 100.0 * nn50 / len(diffs) if len(diffs) > 0 else 0.0
 
-    return {
+    metrics = {
         "SDNN_ms": round(sdnn, 2),
         "RMSSD_ms": round(rmssd, 2),
         "pNN50_%": round(pnn50, 2),
         "n_batimentos_detectados": len(peaks),
     }
+    return metrics
+
 
 # main
 def main():
-    parser = argparse.ArgumentParser(description="Medição de HR/HRV via rPPG")
-    parser.add_argument("--duration", type=float, default=30.0,
-                         help="Duração do escaneamento em segundos")
-    parser.add_argument("--camera", type=int, default=0,
-                         help="Índice da câmera (0 = padrão)")
-    args = parser.parse_args()
+    DURATION_S = 30.0  
+    CAMERA_INDEX = 0
+    MAX_HR = 200.0
+    MIN_PROMINENCE = 0.3
 
-    capture = RPPGCapture(camera_index=args.camera, duration_s=args.duration)
-    roi_signals, fps = capture.run()
+    capture = RPPGCapture(camera_index=CAMERA_INDEX, duration_s=DURATION_S)
+    roi_signals_raw, timestamps = capture.run()
+
+    roi_signals, t_uniform, fps = resample_to_uniform_grid(roi_signals_raw, timestamps)
+    print(f"Sinal reamostrado para grade uniforme: fps={fps:.2f}, {len(t_uniform)} amostras")
 
     rppg_signal = combine_roi_and_methods(roi_signals, fps)
 
     filtered = bandpass_filter(rppg_signal, fps, low_hz=0.7, high_hz=4.0)
 
-    hr_bpm, freqs, spectrum = compute_hr_fft(filtered, fps)
+    hr_bpm = compute_hr_fft(filtered, fps)
 
-    hrv_metrics = compute_hrv(filtered, fps)
+    hrv_metrics = compute_hrv(
+        filtered, fps, t_uniform[:len(filtered)],
+        max_hr_bpm=MAX_HR, min_prominence_std=MIN_PROMINENCE,
+    )
+
+    duracao_medida_s = t_uniform[len(filtered) - 1] - t_uniform[0]
+    n_batimentos = hrv_metrics["n_batimentos_detectados"]
+    bpm_por_contagem_picos = (n_batimentos / (duracao_medida_s / 60.0)
+                               if n_batimentos and duracao_medida_s > 0 else None)
 
     print("\n================ RESULTADOS ================")
-    #print(f"Frequência Cardíaca estimada: {hr_bpm:.1f} bpm")
-    print("Variabilidade da Frequência Cardíaca (HRV):")
+    print(f"HR estimado por FFT:                 {hr_bpm:.1f} bpm")
+    print(f"Duração efetivamente analisada:      {duracao_medida_s:.2f} s")
+    if bpm_por_contagem_picos is not None:
+        print(f"HR estimado por contagem de picos:   {bpm_por_contagem_picos:.1f} bpm")
+    print("\nVariabilidade da Frequência Cardíaca (HRV):")
     for k, v in hrv_metrics.items():
         print(f"  {k}: {v}")
     print("==============================================\n")
 
-    return {"hrv": hrv_metrics}
+    return {"hr_bpm": hr_bpm, "hrv": hrv_metrics}
 
 
 if __name__ == "__main__":
