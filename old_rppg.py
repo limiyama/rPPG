@@ -329,7 +329,7 @@ def main():
     hrv_metrics = compute_hrv(filtered, fps)
 
     print("\n================ RESULTADOS ================")
-    #print(f"Frequência Cardíaca estimada: {hr_bpm:.1f} bpm")
+    print(f"Frequência Cardíaca estimada: {hr_bpm:.1f} bpm")
     print("Variabilidade da Frequência Cardíaca (HRV):")
     for k, v in hrv_metrics.items():
         print(f"  {k}: {v}")
